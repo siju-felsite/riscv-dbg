@@ -49,6 +49,7 @@ module dm_csrs #(
   output logic [NrHarts-1:0]                resumereq_o,     // request hart to resume
   // Clears stale acknowledgements before issuing new resume requests
   output logic [NrHarts-1:0]                clear_resumeack_o,
+  output logic [NrHarts-1:0]                resethaltreq_o,    // halt-on-reset request per hart
 
   output logic                              cmd_valid_o,       // debugger writing to cmd field
   output dm::command_t                      cmd_o,             // abstract command
@@ -179,6 +180,8 @@ module dm_csrs #(
 
   logic [NrHarts-1:0] havereset_d, havereset_q;
   logic [NrHarts-1:0] resume_pending_d, resume_pending_q;
+  logic [NrHarts-1:0] resethaltreq_d, resethaltreq_q;
+  logic [HartSelLen-1:0] resethaltsel;
   // program buffer
   logic [dm::ProgBufSize-1:0][31:0] progbuf_d, progbuf_q;
   logic [dm::DataCount-1:0][31:0] data_d, data_d_dmi, data_q;
@@ -265,8 +268,8 @@ module dm_csrs #(
     dmstatus.version = dm::DbgVersion013;
     // no authentication implemented
     dmstatus.authenticated = 1'b1;
-    // we do not support halt-on-reset sequence
-    dmstatus.hasresethaltreq = 1'b0;
+    // we support the halt-on-reset sequence
+    dmstatus.hasresethaltreq = 1'b1;
     // TODO(zarubaf) things need to change here if we implement the array mask
     dmstatus.allhavereset = havereset_q_aligned[selected_hart];
     dmstatus.anyhavereset = havereset_q_aligned[selected_hart];
@@ -310,6 +313,7 @@ module dm_csrs #(
     resume_pending_d     = resume_pending_q;
     // Acknowledgements retire only the corresponding pending actions
     resume_pending_d    &= ~resumeack_i;
+    resethaltreq_d      = resethaltreq_q;
     cmderr_d            = cmderr_q;
     command_d           = command_q;
     progbuf_d           = progbuf_q;
@@ -327,6 +331,7 @@ module dm_csrs #(
 
     // helper variables
     sbcs = '0;
+    resethaltsel = '0;
 
     // reads
     if (dmi_req_ready_o && dmi_req_valid_i && dtm_op == dm::DTM_READ) begin
@@ -434,6 +439,12 @@ module dm_csrs #(
           // clear the havreset of the selected hart
           if (dmcontrol_d.ackhavereset && selected_hart_valid) begin
             havereset_d[selected_hart] = 1'b0;
+          end
+          // halt-on-reset: set/clear applies to the hart selected by THIS write
+          resethaltsel = HartSelLen'({dmcontrol_d.hartselhi, dmcontrol_d.hartsello});
+          if (resethaltsel <= HartSelLen'(NrHarts-1)) begin
+            if (dmcontrol_d.setresethaltreq) resethaltreq_d[resethaltsel] = 1'b1;
+            if (dmcontrol_d.clrresethaltreq) resethaltreq_d[resethaltsel] = 1'b0;
           end
         end
         dm::DMStatus:; // write are ignored to R/O register
@@ -631,6 +642,7 @@ module dm_csrs #(
   end
 
   assign dmactive_o  = dmcontrol_q.dmactive;
+  assign resethaltreq_o = resethaltreq_q;
   assign cmd_o       = command_q;
   assign cmd_valid_o = cmd_valid_q;
   assign progbuf_o   = progbuf_q;
@@ -675,6 +687,7 @@ module dm_csrs #(
       sbdata_q       <= '0;
       havereset_q    <= '1;
       resume_pending_q <= '0;
+      resethaltreq_q <= '0;
     end else begin
       havereset_q    <= SelectableHarts & havereset_d;
       // synchronous re-set of debug module, active-low, except for dmactive
@@ -692,6 +705,7 @@ module dm_csrs #(
         dmcontrol_q.clrresethaltreq  <= '0;
         dmcontrol_q.ndmreset         <= '0;
         resume_pending_q             <= '0;
+        resethaltreq_q               <= '0;
         // this is the only write-able bit during reset
         dmcontrol_q.dmactive         <= dmcontrol_d.dmactive;
         cmderr_q                     <= dm::CmdErrNone;
@@ -706,6 +720,7 @@ module dm_csrs #(
       end else begin
         dmcontrol_q                  <= dmcontrol_d;
         resume_pending_q             <= SelectableHarts & resume_pending_d;
+        resethaltreq_q               <= resethaltreq_d;
         cmderr_q                     <= cmderr_d;
         command_q                    <= command_d;
         cmd_valid_q                  <= cmd_valid_d;
